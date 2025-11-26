@@ -1,3 +1,7 @@
+node_modules/
+.npm
+npm-debug.log*
+
 __pycache__/
 *.py[cod]
 *$py.class
