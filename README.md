@@ -1,60 +1,82 @@
-See the final demo of this series: https://loonride.com/examples/slither-io/slither-io/
+# Slither.io Multiplayer Clone
 
-Part 1 of the tutorial series: https://loonride.com/learn/phaser/slither-io-part-1
+A real-time online multiplayer snake game inspired by Slither.io, built with Node.js, Socket.IO, and Phaser 3.
 
-Video - Coding Slither.io in One Week with JavaScript: https://youtu.be/Nlo8LyO8HAQ
+## Play Now
 
-![alt text](https://loonride.com/asset/learn/slither-io/main.png "how to make Slither.io Part 1")
+Join the arena, eat food pellets to grow, and avoid crashing into other snakes!
 
+## Features
 
-### About this Clone
+- **Online Multiplayer** - Play with friends and strangers in real-time
+- **Circular Arena** - Navigate within a bounded circular map
+- **Leaderboard** - Compete for the top spot on the live leaderboard
+- **Speed Boost** - Use boost to outmaneuver opponents (costs length)
+- **Minimap** - Track all players on the radar
+- **Auto-Respawn** - Get back in the game 3 seconds after death
 
-This clone of the game Slither.io was created to teach game design concepts with JavaScript and the Phaser game framework. It showcases physics collisions and organization concepts of the game without implementing the multiplayer server aspect.
+## Controls
 
-**Cloned Features:**
+| Action | Control |
+|--------|---------|
+| Move | Mouse cursor |
+| Boost | Spacebar or Mouse Click |
 
-* Player and bot snakes
-* Mouse and arrow-key controls
-* Speeding up with spacebar
-* Death from head-on collisions
-* Random food placed at start
-* Snake growth from eating
-* Food dropped on death
-* Shadows and interactive eyes
+## How to Play
 
+1. Enter your name when prompted
+2. Move your snake by pointing your mouse where you want to go
+3. Eat colored food pellets to grow longer and increase your score
+4. Avoid hitting other snakes or the red boundary
+5. Use boost strategically to escape danger or cut off opponents
+6. When you die, your snake becomes food for others
 
-### Contributing
+## Tech Stack
 
-Because this source code has a tutorial series built around it, I will only be accepting minor changes. If there is great interest in furthering this clone, I will create a new repository to take contributions. Show your interest by emailing me at contact@loonride.com
+- **Backend**: Node.js, Express.js, Socket.IO
+- **Frontend**: Phaser 3 (HTML5 Canvas/WebGL)
+- **Real-time**: WebSocket communication at 20Hz
 
+## Running Locally
 
-### Tutorial Links
+```bash
+npm install
+node server.js
+```
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-1">How to make Slither.io with JavaScript: Part 1 - Introduction</a>
+Then open http://localhost:5000 in your browser.
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-2">How to make Slither.io with JavaScript: Part 2 - Snake</a>
+## Game Configuration
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-3">How to make Slither.io with JavaScript: Part 3 - Players & Bots</a>
+| Setting | Value |
+|---------|-------|
+| Map Radius | 2000 pixels |
+| Starting Length | 10 segments |
+| Normal Speed | 3 |
+| Boost Speed | 6 |
+| Food Count | 300 |
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-4">How to make Slither.io with JavaScript: Part 4 - Collisions</a>
+## Project Structure
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-5">How to make Slither.io with JavaScript: Part 5 - Snake Eyes</a>
+```
+.
+├── server.js           # Multiplayer game server
+├── index.html          # Main HTML file
+├── client/
+│   └── game.js         # Phaser 3 game client
+├── asset/              # Game graphics
+│   ├── circle.png
+│   ├── hex.png
+│   ├── eye-white.png
+│   ├── eye-black.png
+│   └── ...
+└── package.json        # Dependencies
+```
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-6">How to make Slither.io with JavaScript: Part 6 - Snake Shadows</a>
+## Credits
 
-<a href="https://loonride.com/learn/phaser/slither-io-part-7">How to make Slither.io with JavaScript: Part 7 - Food & Conclusion</a>
+Original single-player concept based on the tutorial series from [Loonride](https://loonride.com/learn/phaser/slither-io-part-1).
 
+## License
 
-### Demo Links
-
-<a href="https://loonride.com/examples/slither-io/part-2/">Part 2 Demo</a>
-
-<a href="https://loonride.com/examples/slither-io/part-3/">Part 3 Demo</a>
-
-<a href="https://loonride.com/examples/slither-io/part-4/">Part 4 Demo</a>
-
-<a href="https://loonride.com/examples/slither-io/part-5/">Part 5 Demo</a>
-
-<a href="https://loonride.com/examples/slither-io/part-6/">Part 6 Demo</a>
-
-<a href="https://loonride.com/examples/slither-io/slither-io/">Final Demo</a>
+MIT License
