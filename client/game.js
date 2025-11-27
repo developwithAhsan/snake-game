@@ -3,38 +3,112 @@ const MultiplayerGame = (function() {
     let game;
     let myId;
     let gameState = { players: {}, food: [], leaderboard: [] };
+    let prevGameState = { players: {}, food: [] };
     let mapRadius = 2000;
     let camera = { x: 0, y: 0 };
+    let targetCamera = { x: 0, y: 0 };
     let inputState = { angle: 0, boosting: false };
     let lastInputState = { angle: 0, boosting: false };
     let lastInputTime = 0;
     let isAlive = true;
     let playerName = '';
+    let lastServerTime = 0;
+    let interpolationFactor = 0;
+    let lastNetworkUpdate = 0;
+    let networkInterval = 66;
+    let isMobile = false;
+    let qualityLevel = 'high';
+    let touchJoystick = { active: false, startX: 0, startY: 0, currentX: 0, currentY: 0 };
 
     const INPUT_THROTTLE_MS = 50;
+    const CAMERA_LERP = 0.15;
 
     const COLORS = {
-        background: '#1a1a2e',
-        gridLine: '#2a2a4e',
-        boundary: '#ff4444',
-        boundaryGlow: 'rgba(255, 68, 68, 0.3)',
-        food: '#ff6b6b',
-        text: '#ffffff',
-        leaderboard: 'rgba(0, 0, 0, 0.7)'
+        background: 0x1a1a2e,
+        gridLine: 0x2a2a4e,
+        boundary: 0xff4444,
+        text: '#ffffff'
     };
+
+    const colorCache = new Map();
 
     let uiElements = {
         scoreText: null,
         lengthText: null,
         leaderboardText: null,
         deathText: null,
-        nameTexts: {}
+        nameTexts: {},
+        joystickGraphics: null
     };
 
-    function init() {
-        playerName = prompt('Enter your name:', 'Player') || 'Player';
+    let gridTexture = null;
+    let gridSprite = null;
 
-        socket = io();
+    function detectDevice() {
+        isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) 
+            || ('ontouchstart' in window) 
+            || (navigator.maxTouchPoints > 0);
+        
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl');
+        let performance = 'high';
+        
+        if (gl) {
+            const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+            if (debugInfo) {
+                const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                if (renderer.toLowerCase().includes('mali') || 
+                    renderer.toLowerCase().includes('adreno 3') ||
+                    renderer.toLowerCase().includes('intel')) {
+                    performance = 'medium';
+                }
+            }
+        }
+        
+        if (isMobile) {
+            performance = 'medium';
+        }
+        
+        const memory = navigator.deviceMemory || 4;
+        if (memory < 4) {
+            performance = 'low';
+        }
+        
+        qualityLevel = performance;
+        console.log(`Device: ${isMobile ? 'Mobile' : 'Desktop'}, Quality: ${qualityLevel}`);
+    }
+
+    function getColor(hexString) {
+        if (!colorCache.has(hexString)) {
+            colorCache.set(hexString, Phaser.Display.Color.HexStringToColor(hexString).color);
+        }
+        return colorCache.get(hexString);
+    }
+
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
+    }
+
+    function lerpPoint(p1, p2, t) {
+        return {
+            x: lerp(p1.x, p2.x, t),
+            y: lerp(p1.y, p2.y, t)
+        };
+    }
+
+    function init() {
+        detectDevice();
+        
+        if (isMobile) {
+            playerName = prompt('Enter your name:', 'Player') || 'Player';
+        } else {
+            playerName = prompt('Enter your name:', 'Player') || 'Player';
+        }
+
+        socket = io({
+            transports: ['websocket'],
+            upgrade: false
+        });
 
         socket.on('connect', () => {
             console.log('Connected to server');
@@ -44,14 +118,21 @@ const MultiplayerGame = (function() {
         socket.on('joined', (data) => {
             myId = data.id;
             mapRadius = data.mapRadius;
+            if (data.networkRate) {
+                networkInterval = 1000 / data.networkRate;
+            }
             console.log('Joined game as', data.player.name);
             const loadingEl = document.getElementById('loading');
             if (loadingEl) loadingEl.style.display = 'none';
         });
 
         socket.on('gameState', (state) => {
+            prevGameState = JSON.parse(JSON.stringify(gameState));
             gameState = state;
             if (state.mapRadius) mapRadius = state.mapRadius;
+            if (state.serverTime) lastServerTime = state.serverTime;
+            lastNetworkUpdate = performance.now();
+            interpolationFactor = 0;
         });
 
         socket.on('died', (data) => {
@@ -64,21 +145,37 @@ const MultiplayerGame = (function() {
             console.log('Respawned!');
         });
 
-        game = new Phaser.Game({
+        const gameConfig = {
             type: Phaser.AUTO,
             width: window.innerWidth,
             height: window.innerHeight,
             parent: 'game-container',
             backgroundColor: COLORS.background,
+            render: {
+                antialias: qualityLevel === 'high',
+                pixelArt: false,
+                roundPixels: true,
+                powerPreference: 'high-performance'
+            },
+            fps: {
+                target: qualityLevel === 'low' ? 30 : 60,
+                forceSetTimeOut: qualityLevel === 'low'
+            },
             scene: {
                 preload: preload,
                 create: create,
                 update: update
             }
-        });
+        };
+
+        game = new Phaser.Game(gameConfig);
 
         window.addEventListener('resize', () => {
             game.scale.resize(window.innerWidth, window.innerHeight);
+            if (gridSprite) {
+                gridSprite.setPosition(0, 0);
+                gridSprite.setDisplaySize(window.innerWidth + 100, window.innerHeight + 100);
+            }
         });
     }
 
@@ -89,9 +186,36 @@ const MultiplayerGame = (function() {
         this.load.image('eye-black', 'asset/eye-black.png');
     }
 
+    function createGridTexture(scene) {
+        const gridSize = 50;
+        const graphics = scene.add.graphics();
+        
+        graphics.lineStyle(1, COLORS.gridLine, 0.5);
+        
+        for (let x = 0; x <= gridSize * 2; x += gridSize) {
+            graphics.moveTo(x, 0);
+            graphics.lineTo(x, gridSize * 2);
+        }
+        for (let y = 0; y <= gridSize * 2; y += gridSize) {
+            graphics.moveTo(0, y);
+            graphics.lineTo(gridSize * 2, y);
+        }
+        graphics.strokePath();
+        
+        gridTexture = graphics.generateTexture('gridTile', gridSize, gridSize);
+        graphics.destroy();
+    }
+
     function create() {
-        this.graphics = this.add.graphics();
+        createGridTexture(this);
+        
+        gridSprite = this.add.tileSprite(0, 0, this.cameras.main.width + 100, this.cameras.main.height + 100, 'gridTile');
+        gridSprite.setOrigin(0, 0);
+        gridSprite.setDepth(-10);
+
         this.snakeGraphics = this.add.graphics();
+        this.foodGraphics = this.add.graphics();
+        this.boundaryGraphics = this.add.graphics();
         this.uiGraphics = this.add.graphics();
 
         uiElements.scoreText = this.add.text(20, 20, 'Score: 0', {
@@ -123,27 +247,64 @@ const MultiplayerGame = (function() {
         uiElements.deathText.setDepth(100);
         uiElements.deathText.setVisible(false);
 
+        if (isMobile) {
+            uiElements.joystickGraphics = this.add.graphics();
+            uiElements.joystickGraphics.setDepth(99);
+        }
+
         this.input.on('pointermove', (pointer) => {
-            const centerX = this.cameras.main.width / 2;
-            const centerY = this.cameras.main.height / 2;
-            inputState.angle = Math.atan2(pointer.y - centerY, pointer.x - centerX);
+            if (isMobile && touchJoystick.active) {
+                touchJoystick.currentX = pointer.x;
+                touchJoystick.currentY = pointer.y;
+                const dx = touchJoystick.currentX - touchJoystick.startX;
+                const dy = touchJoystick.currentY - touchJoystick.startY;
+                if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                    inputState.angle = Math.atan2(dy, dx);
+                }
+            } else if (!isMobile) {
+                const centerX = this.cameras.main.width / 2;
+                const centerY = this.cameras.main.height / 2;
+                inputState.angle = Math.atan2(pointer.y - centerY, pointer.x - centerX);
+            }
         });
 
-        this.input.keyboard.on('keydown-SPACE', () => {
-            inputState.boosting = true;
-        });
+        if (!isMobile) {
+            this.input.keyboard.on('keydown-SPACE', () => {
+                inputState.boosting = true;
+            });
 
-        this.input.keyboard.on('keyup-SPACE', () => {
-            inputState.boosting = false;
-        });
+            this.input.keyboard.on('keyup-SPACE', () => {
+                inputState.boosting = false;
+            });
+        }
 
-        this.input.on('pointerdown', () => {
-            inputState.boosting = true;
+        this.input.on('pointerdown', (pointer) => {
+            if (isMobile) {
+                touchJoystick.active = true;
+                touchJoystick.startX = pointer.x;
+                touchJoystick.startY = pointer.y;
+                touchJoystick.currentX = pointer.x;
+                touchJoystick.currentY = pointer.y;
+                
+                if (pointer.x > this.cameras.main.width * 0.7) {
+                    inputState.boosting = true;
+                }
+            } else {
+                inputState.boosting = true;
+            }
         });
 
         this.input.on('pointerup', () => {
+            if (isMobile) {
+                touchJoystick.active = false;
+            }
             inputState.boosting = false;
         });
+
+        const controlsHint = document.getElementById('controls-hint');
+        if (controlsHint && isMobile) {
+            controlsHint.innerHTML = 'Drag: Move | Tap Right Side: Boost';
+        }
     }
 
     function sendInput() {
@@ -159,55 +320,65 @@ const MultiplayerGame = (function() {
         }
     }
 
-    function update() {
+    function update(time, delta) {
         if (!myId) return;
 
         sendInput();
 
+        const now = performance.now();
+        interpolationFactor = Math.min((now - lastNetworkUpdate) / networkInterval, 1);
+
         const myPlayer = gameState.players[myId];
         if (myPlayer && myPlayer.segments && myPlayer.segments.length > 0) {
             const head = myPlayer.segments[0];
-            camera.x = head.x;
-            camera.y = head.y;
+            targetCamera.x = head.x;
+            targetCamera.y = head.y;
         }
 
-        this.graphics.clear();
+        camera.x = lerp(camera.x, targetCamera.x, CAMERA_LERP);
+        camera.y = lerp(camera.y, targetCamera.y, CAMERA_LERP);
+
+        if (gridSprite) {
+            gridSprite.tilePositionX = camera.x;
+            gridSprite.tilePositionY = camera.y;
+        }
+
         this.snakeGraphics.clear();
+        this.foodGraphics.clear();
+        this.boundaryGraphics.clear();
         this.uiGraphics.clear();
 
-        drawBackground.call(this);
         drawBoundary.call(this);
         drawFood.call(this);
         drawSnakes.call(this);
         drawUI.call(this);
+
+        if (isMobile && touchJoystick.active && uiElements.joystickGraphics) {
+            drawJoystick.call(this);
+        } else if (uiElements.joystickGraphics) {
+            uiElements.joystickGraphics.clear();
+        }
     }
 
-    function drawBackground() {
-        const graphics = this.graphics;
-        const centerX = this.cameras.main.width / 2;
-        const centerY = this.cameras.main.height / 2;
-        const gridSize = 50;
-
-        graphics.lineStyle(1, 0x2a2a4e, 0.5);
-
-        const startX = -camera.x % gridSize - gridSize;
-        const startY = -camera.y % gridSize - gridSize;
-
-        for (let x = startX; x < this.cameras.main.width + gridSize; x += gridSize) {
-            graphics.moveTo(x, 0);
-            graphics.lineTo(x, this.cameras.main.height);
-        }
-
-        for (let y = startY; y < this.cameras.main.height + gridSize; y += gridSize) {
-            graphics.moveTo(0, y);
-            graphics.lineTo(this.cameras.main.width, y);
-        }
-
-        graphics.strokePath();
+    function drawJoystick() {
+        const graphics = uiElements.joystickGraphics;
+        graphics.clear();
+        
+        graphics.fillStyle(0xffffff, 0.2);
+        graphics.fillCircle(touchJoystick.startX, touchJoystick.startY, 60);
+        
+        graphics.fillStyle(0xffffff, 0.5);
+        const dx = touchJoystick.currentX - touchJoystick.startX;
+        const dy = touchJoystick.currentY - touchJoystick.startY;
+        const dist = Math.min(Math.sqrt(dx * dx + dy * dy), 50);
+        const angle = Math.atan2(dy, dx);
+        const thumbX = touchJoystick.startX + Math.cos(angle) * dist;
+        const thumbY = touchJoystick.startY + Math.sin(angle) * dist;
+        graphics.fillCircle(thumbX, thumbY, 25);
     }
 
     function drawBoundary() {
-        const graphics = this.graphics;
+        const graphics = this.boundaryGraphics;
         const centerX = this.cameras.main.width / 2;
         const centerY = this.cameras.main.height / 2;
 
@@ -217,8 +388,10 @@ const MultiplayerGame = (function() {
         graphics.lineStyle(8, 0xff4444, 0.8);
         graphics.strokeCircle(boundaryScreenX, boundaryScreenY, mapRadius);
 
-        graphics.lineStyle(20, 0xff4444, 0.2);
-        graphics.strokeCircle(boundaryScreenX, boundaryScreenY, mapRadius);
+        if (qualityLevel !== 'low') {
+            graphics.lineStyle(20, 0xff4444, 0.2);
+            graphics.strokeCircle(boundaryScreenX, boundaryScreenY, mapRadius);
+        }
 
         const myPlayer = gameState.players[myId];
         if (myPlayer && myPlayer.segments && myPlayer.segments.length > 0) {
@@ -235,25 +408,47 @@ const MultiplayerGame = (function() {
     }
 
     function drawFood() {
-        const graphics = this.graphics;
+        const graphics = this.foodGraphics;
         const centerX = this.cameras.main.width / 2;
         const centerY = this.cameras.main.height / 2;
+        const width = this.cameras.main.width;
+        const height = this.cameras.main.height;
 
+        const foodSize = qualityLevel === 'low' ? 6 : 8;
+        const highlightSize = qualityLevel === 'low' ? 2 : 3;
+
+        const foodByColor = new Map();
+        
         for (const food of gameState.food) {
             const screenX = centerX + (food.x - camera.x);
             const screenY = centerY + (food.y - camera.y);
 
-            if (screenX < -20 || screenX > this.cameras.main.width + 20 ||
-                screenY < -20 || screenY > this.cameras.main.height + 20) {
+            if (screenX < -20 || screenX > width + 20 ||
+                screenY < -20 || screenY > height + 20) {
                 continue;
             }
 
-            const color = Phaser.Display.Color.HexStringToColor(food.color).color;
-            graphics.fillStyle(color, 1);
-            graphics.fillCircle(screenX, screenY, 8);
+            const color = getColor(food.color);
+            if (!foodByColor.has(color)) {
+                foodByColor.set(color, []);
+            }
+            foodByColor.set(color, [...foodByColor.get(color), { screenX, screenY }]);
+        }
 
+        for (const [color, positions] of foodByColor) {
+            graphics.fillStyle(color, 1);
+            for (const pos of positions) {
+                graphics.fillCircle(pos.screenX, pos.screenY, foodSize);
+            }
+        }
+
+        if (qualityLevel !== 'low') {
             graphics.fillStyle(0xffffff, 0.3);
-            graphics.fillCircle(screenX - 2, screenY - 2, 3);
+            for (const [color, positions] of foodByColor) {
+                for (const pos of positions) {
+                    graphics.fillCircle(pos.screenX - 2, pos.screenY - 2, highlightSize);
+                }
+            }
         }
     }
 
@@ -261,6 +456,8 @@ const MultiplayerGame = (function() {
         const graphics = this.snakeGraphics;
         const centerX = this.cameras.main.width / 2;
         const centerY = this.cameras.main.height / 2;
+        const width = this.cameras.main.width;
+        const height = this.cameras.main.height;
 
         const sortedPlayers = Object.values(gameState.players).sort((a, b) => {
             if (a.id === myId) return 1;
@@ -269,46 +466,62 @@ const MultiplayerGame = (function() {
         });
 
         const activePlayerIds = new Set();
+        const segmentSkip = qualityLevel === 'low' ? 2 : 1;
 
         for (const player of sortedPlayers) {
             if (!player.alive || !player.segments || player.segments.length === 0) continue;
 
             activePlayerIds.add(player.id);
 
-            const color = Phaser.Display.Color.HexStringToColor(player.color).color;
+            const color = getColor(player.color);
             const isMe = player.id === myId;
+            const segmentCount = player.segments.length;
 
-            graphics.fillStyle(0x000000, 0.3);
-            for (let i = player.segments.length - 1; i >= 0; i--) {
-                const seg = player.segments[i];
-                const screenX = centerX + (seg.x - camera.x) + 5;
-                const screenY = centerY + (seg.y - camera.y) + 5;
+            if (qualityLevel !== 'low') {
+                graphics.fillStyle(0x000000, 0.3);
+                for (let i = segmentCount - 1; i >= 0; i -= segmentSkip) {
+                    const seg = player.segments[i];
+                    const screenX = centerX + (seg.x - camera.x) + 5;
+                    const screenY = centerY + (seg.y - camera.y) + 5;
 
-                if (screenX < -30 || screenX > this.cameras.main.width + 30 ||
-                    screenY < -30 || screenY > this.cameras.main.height + 30) {
-                    continue;
+                    if (screenX < -30 || screenX > width + 30 ||
+                        screenY < -30 || screenY > height + 30) {
+                        continue;
+                    }
+
+                    const size = 12 - (i / segmentCount) * 4;
+                    graphics.fillCircle(screenX, screenY, size);
                 }
-
-                const size = 12 - (i / player.segments.length) * 4;
-                graphics.fillCircle(screenX, screenY, size);
             }
 
-            for (let i = player.segments.length - 1; i >= 0; i--) {
+            graphics.fillStyle(color, 1);
+            for (let i = segmentCount - 1; i >= 0; i -= segmentSkip) {
                 const seg = player.segments[i];
                 const screenX = centerX + (seg.x - camera.x);
                 const screenY = centerY + (seg.y - camera.y);
 
-                if (screenX < -30 || screenX > this.cameras.main.width + 30 ||
-                    screenY < -30 || screenY > this.cameras.main.height + 30) {
+                if (screenX < -30 || screenX > width + 30 ||
+                    screenY < -30 || screenY > height + 30) {
                     continue;
                 }
 
-                const size = 12 - (i / player.segments.length) * 4;
-                graphics.fillStyle(color, 1);
+                const size = 12 - (i / segmentCount) * 4;
                 graphics.fillCircle(screenX, screenY, size);
+            }
 
-                if (isMe) {
-                    graphics.lineStyle(2, 0xffffff, 0.3);
+            if (isMe && qualityLevel !== 'low') {
+                graphics.lineStyle(2, 0xffffff, 0.3);
+                for (let i = segmentCount - 1; i >= 0; i -= segmentSkip * 2) {
+                    const seg = player.segments[i];
+                    const screenX = centerX + (seg.x - camera.x);
+                    const screenY = centerY + (seg.y - camera.y);
+
+                    if (screenX < -30 || screenX > width + 30 ||
+                        screenY < -30 || screenY > height + 30) {
+                        continue;
+                    }
+
+                    const size = 12 - (i / segmentCount) * 4;
                     graphics.strokeCircle(screenX, screenY, size);
                 }
             }
@@ -317,10 +530,10 @@ const MultiplayerGame = (function() {
             const headX = centerX + (head.x - camera.x);
             const headY = centerY + (head.y - camera.y);
 
-            if (headX >= -30 && headX <= this.cameras.main.width + 30 &&
-                headY >= -30 && headY <= this.cameras.main.height + 30) {
+            if (headX >= -30 && headX <= width + 30 &&
+                headY >= -30 && headY <= height + 30) {
 
-                let angle = 0;
+                let angle = player.angle || 0;
                 if (player.segments.length > 1) {
                     const next = player.segments[1];
                     angle = Math.atan2(head.y - next.y, head.x - next.x);
@@ -373,8 +586,9 @@ const MultiplayerGame = (function() {
         const width = this.cameras.main.width;
         const height = this.cameras.main.height;
 
+        const leaderboardHeight = 30 + gameState.leaderboard.length * 25;
         graphics.fillStyle(0x000000, 0.7);
-        graphics.fillRoundedRect(width - 220, 10, 210, 30 + gameState.leaderboard.length * 25, 8);
+        graphics.fillRoundedRect(width - 220, 10, 210, leaderboardHeight, 8);
 
         let leaderboardText = 'Leaderboard\n';
         gameState.leaderboard.forEach((entry, i) => {
@@ -393,33 +607,35 @@ const MultiplayerGame = (function() {
             uiElements.lengthText.setText(`Length: ${myPlayer.segments ? myPlayer.segments.length : 0}`);
         }
 
-        const minimapSize = 150;
-        const minimapX = 10;
-        const minimapY = height - minimapSize - 10;
+        if (qualityLevel !== 'low') {
+            const minimapSize = isMobile ? 100 : 150;
+            const minimapX = 10;
+            const minimapY = height - minimapSize - 10;
 
-        graphics.fillStyle(0x000000, 0.5);
-        graphics.fillCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
+            graphics.fillStyle(0x000000, 0.5);
+            graphics.fillCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
 
-        graphics.lineStyle(2, 0xff4444, 0.8);
-        graphics.strokeCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
+            graphics.lineStyle(2, 0xff4444, 0.8);
+            graphics.strokeCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
 
-        const scale = minimapSize / (mapRadius * 2);
+            const scale = minimapSize / (mapRadius * 2);
 
-        for (const id in gameState.players) {
-            const player = gameState.players[id];
-            if (!player.alive || !player.segments || player.segments.length === 0) continue;
+            for (const id in gameState.players) {
+                const player = gameState.players[id];
+                if (!player.alive || !player.segments || player.segments.length === 0) continue;
 
-            const head = player.segments[0];
-            const dotX = minimapX + minimapSize / 2 + head.x * scale;
-            const dotY = minimapY + minimapSize / 2 + head.y * scale;
+                const head = player.segments[0];
+                const dotX = minimapX + minimapSize / 2 + head.x * scale;
+                const dotY = minimapY + minimapSize / 2 + head.y * scale;
 
-            if (player.id === myId) {
-                graphics.fillStyle(0x00ff00, 1);
-                graphics.fillCircle(dotX, dotY, 4);
-            } else {
-                const color = Phaser.Display.Color.HexStringToColor(player.color).color;
-                graphics.fillStyle(color, 1);
-                graphics.fillCircle(dotX, dotY, 3);
+                if (player.id === myId) {
+                    graphics.fillStyle(0x00ff00, 1);
+                    graphics.fillCircle(dotX, dotY, 4);
+                } else {
+                    const color = getColor(player.color);
+                    graphics.fillStyle(color, 1);
+                    graphics.fillCircle(dotX, dotY, 3);
+                }
             }
         }
 
@@ -430,9 +646,21 @@ const MultiplayerGame = (function() {
             graphics.fillStyle(0x000000, 0.8);
             graphics.fillRect(0, height / 2 - 50, width, 100);
         }
+
+        if (isMobile) {
+            graphics.fillStyle(0xffffff, 0.15);
+            graphics.fillCircle(width - 80, height - 100, 50);
+            
+            graphics.fillStyle(0xffffff, 0.3);
+            const boostText = this.add.text ? null : 'BOOST';
+        }
     }
 
-    return { init };
+    function setBoost(boosting) {
+        inputState.boosting = boosting;
+    }
+
+    return { init, setBoost };
 })();
 
 window.onload = () => {

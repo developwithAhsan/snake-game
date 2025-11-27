@@ -9,6 +9,11 @@ const io = new Server(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
+    },
+    pingInterval: 10000,
+    pingTimeout: 5000,
+    perMessageDeflate: {
+        threshold: 1024
     }
 });
 
@@ -16,15 +21,16 @@ app.use(express.static('.'));
 
 const GAME_CONFIG = {
     MAP_RADIUS: 2000,
-    TICK_RATE: 60,
-    NETWORK_RATE: 20,
-    FOOD_COUNT: 300,
+    TICK_RATE: 30,
+    NETWORK_RATE: 15,
+    FOOD_COUNT: 200,
     INITIAL_SNAKE_LENGTH: 10,
     SNAKE_SPEED: 3,
     BOOST_SPEED: 6,
     SEGMENT_DISTANCE: 15,
     FOOD_VALUE: 1,
-    VIEW_DISTANCE: 800,
+    VIEW_DISTANCE: 600,
+    GRID_SIZE: 200,
     SNAKE_COLORS: [
         '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#f39c12',
         '#1abc9c', '#e91e63', '#00bcd4', '#ff5722', '#795548'
@@ -36,13 +42,42 @@ let networkTick = 0;
 const gameState = {
     players: {},
     food: [],
-    leaderboard: []
+    foodGrid: {},
+    leaderboard: [],
+    lastState: {}
 };
+
+function getGridKey(x, y) {
+    const gx = Math.floor(x / GAME_CONFIG.GRID_SIZE);
+    const gy = Math.floor(y / GAME_CONFIG.GRID_SIZE);
+    return `${gx},${gy}`;
+}
+
+function addFoodToGrid(food) {
+    const key = getGridKey(food.x, food.y);
+    if (!gameState.foodGrid[key]) {
+        gameState.foodGrid[key] = [];
+    }
+    gameState.foodGrid[key].push(food);
+}
+
+function removeFoodFromGrid(food) {
+    const key = getGridKey(food.x, food.y);
+    if (gameState.foodGrid[key]) {
+        const idx = gameState.foodGrid[key].indexOf(food);
+        if (idx !== -1) {
+            gameState.foodGrid[key].splice(idx, 1);
+        }
+    }
+}
 
 function generateFood() {
     const food = [];
+    gameState.foodGrid = {};
     for (let i = 0; i < GAME_CONFIG.FOOD_COUNT; i++) {
-        food.push(createFood(i));
+        const f = createFood(i);
+        food.push(f);
+        addFoodToGrid(f);
     }
     return food;
 }
@@ -50,12 +85,13 @@ function generateFood() {
 function createFood(id) {
     const angle = Math.random() * Math.PI * 2;
     const radius = Math.random() * (GAME_CONFIG.MAP_RADIUS - 100);
-    return {
+    const food = {
         id: id,
         x: Math.cos(angle) * radius,
         y: Math.sin(angle) * radius,
         color: GAME_CONFIG.SNAKE_COLORS[Math.floor(Math.random() * GAME_CONFIG.SNAKE_COLORS.length)]
     };
+    return food;
 }
 
 function createPlayer(id, name) {
@@ -83,7 +119,8 @@ function createPlayer(id, name) {
         speed: GAME_CONFIG.SNAKE_SPEED,
         boosting: false,
         score: 0,
-        alive: true
+        alive: true,
+        lastUpdate: Date.now()
     };
 }
 
@@ -122,13 +159,15 @@ function updatePlayer(player) {
 }
 
 function dropFood(x, y) {
-    const foodId = gameState.food.length;
-    gameState.food.push({
+    const foodId = Date.now() + Math.random();
+    const food = {
         id: foodId,
         x: x + (Math.random() - 0.5) * 20,
         y: y + (Math.random() - 0.5) * 20,
         color: GAME_CONFIG.SNAKE_COLORS[Math.floor(Math.random() * GAME_CONFIG.SNAKE_COLORS.length)]
-    });
+    };
+    gameState.food.push(food);
+    addFoodToGrid(food);
 }
 
 function killPlayer(player) {
@@ -150,25 +189,49 @@ function killPlayer(player) {
     }, 3000);
 }
 
+function getNearbyGridCells(x, y, radius) {
+    const cells = [];
+    const gridRadius = Math.ceil(radius / GAME_CONFIG.GRID_SIZE);
+    const centerGx = Math.floor(x / GAME_CONFIG.GRID_SIZE);
+    const centerGy = Math.floor(y / GAME_CONFIG.GRID_SIZE);
+    
+    for (let dx = -gridRadius; dx <= gridRadius; dx++) {
+        for (let dy = -gridRadius; dy <= gridRadius; dy++) {
+            const key = `${centerGx + dx},${centerGy + dy}`;
+            if (gameState.foodGrid[key]) {
+                cells.push(...gameState.foodGrid[key]);
+            }
+        }
+    }
+    return cells;
+}
+
 function checkCollisions(player) {
     if (!player.alive) return;
 
     const head = player.segments[0];
+    const nearbyFood = getNearbyGridCells(head.x, head.y, 50);
 
-    for (let i = gameState.food.length - 1; i >= 0; i--) {
-        const food = gameState.food[i];
+    for (let i = nearbyFood.length - 1; i >= 0; i--) {
+        const food = nearbyFood[i];
         const dx = head.x - food.x;
         const dy = head.y - food.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const distSq = dx * dx + dy * dy;
 
-        if (dist < 20) {
-            gameState.food.splice(i, 1);
+        if (distSq < 400) {
+            removeFoodFromGrid(food);
+            const idx = gameState.food.indexOf(food);
+            if (idx !== -1) {
+                gameState.food.splice(idx, 1);
+            }
             player.score += GAME_CONFIG.FOOD_VALUE;
 
             const tail = player.segments[player.segments.length - 1];
             player.segments.push({ x: tail.x, y: tail.y });
 
-            gameState.food.push(createFood(Date.now() + i));
+            const newFood = createFood(Date.now() + i);
+            gameState.food.push(newFood);
+            addFoodToGrid(newFood);
         }
     }
 
@@ -177,13 +240,18 @@ function checkCollisions(player) {
         const other = gameState.players[otherId];
         if (!other.alive) continue;
 
+        const otherHead = other.segments[0];
+        const hdx = head.x - otherHead.x;
+        const hdy = head.y - otherHead.y;
+        if (hdx * hdx + hdy * hdy > 640000) continue;
+
         for (let i = 0; i < other.segments.length; i++) {
             const seg = other.segments[i];
             const dx = head.x - seg.x;
             const dy = head.y - seg.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
+            const distSq = dx * dx + dy * dy;
 
-            if (dist < 15) {
+            if (distSq < 225) {
                 killPlayer(player);
                 other.score += Math.floor(player.score / 2);
                 return;
@@ -195,9 +263,9 @@ function checkCollisions(player) {
         const seg = player.segments[i];
         const dx = head.x - seg.x;
         const dy = head.y - seg.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const distSq = dx * dx + dy * dy;
 
-        if (dist < 10) {
+        if (distSq < 100) {
             killPlayer(player);
             return;
         }
@@ -222,11 +290,34 @@ function updateLeaderboard() {
 
 function getNearbyFood(playerX, playerY) {
     const viewDist = GAME_CONFIG.VIEW_DISTANCE;
-    return gameState.food.filter(food => {
+    const viewDistSq = viewDist * viewDist;
+    const nearbyGridFood = getNearbyGridCells(playerX, playerY, viewDist);
+    
+    return nearbyGridFood.filter(food => {
         const dx = food.x - playerX;
         const dy = food.y - playerY;
-        return dx * dx + dy * dy < viewDist * viewDist;
+        return dx * dx + dy * dy < viewDistSq;
     });
+}
+
+function compressSegments(segments, maxPoints) {
+    if (segments.length <= maxPoints) {
+        return segments.map(seg => ({ x: seg.x, y: seg.y }));
+    }
+    
+    const step = segments.length / maxPoints;
+    const compressed = [];
+    for (let i = 0; i < maxPoints; i++) {
+        const idx = Math.min(Math.floor(i * step), segments.length - 1);
+        const seg = segments[idx];
+        compressed.push({ x: seg.x, y: seg.y });
+    }
+    const lastSeg = segments[segments.length - 1];
+    const lastCompressed = compressed[compressed.length - 1];
+    if (lastCompressed.x !== lastSeg.x || lastCompressed.y !== lastSeg.y) {
+        compressed.push({ x: lastSeg.x, y: lastSeg.y });
+    }
+    return compressed;
 }
 
 function gameLoop() {
@@ -244,6 +335,8 @@ function gameLoop() {
     }
     networkTick = 0;
 
+    const now = Date.now();
+
     for (const socketId in gameState.players) {
         const myPlayer = gameState.players[socketId];
         if (!myPlayer.segments || myPlayer.segments.length === 0) continue;
@@ -251,24 +344,39 @@ function gameLoop() {
         const head = myPlayer.segments[0];
         const nearbyFood = getNearbyFood(head.x, head.y);
 
-        const state = {
-            players: {},
-            food: nearbyFood,
-            leaderboard: gameState.leaderboard,
-            mapRadius: GAME_CONFIG.MAP_RADIUS
-        };
+        const players = {};
+        const viewDistSq = GAME_CONFIG.VIEW_DISTANCE * GAME_CONFIG.VIEW_DISTANCE * 4;
 
         for (const id in gameState.players) {
             const p = gameState.players[id];
-            state.players[id] = {
-                id: p.id,
-                name: p.name,
-                color: p.color,
-                segments: p.segments,
-                score: p.score,
-                alive: p.alive
-            };
+            if (!p.alive || !p.segments || p.segments.length === 0) continue;
+
+            const pHead = p.segments[0];
+            const dx = pHead.x - head.x;
+            const dy = pHead.y - head.y;
+            const distSq = dx * dx + dy * dy;
+
+            if (id === socketId || distSq < viewDistSq) {
+                const maxSegments = id === socketId ? 100 : 50;
+                players[id] = {
+                    id: p.id,
+                    name: p.name,
+                    color: p.color,
+                    segments: compressSegments(p.segments, maxSegments),
+                    score: p.score,
+                    alive: p.alive,
+                    angle: p.angle
+                };
+            }
         }
+
+        const state = {
+            players: players,
+            food: nearbyFood,
+            leaderboard: gameState.leaderboard,
+            mapRadius: GAME_CONFIG.MAP_RADIUS,
+            serverTime: now
+        };
 
         io.to(socketId).emit('gameState', state);
     }
@@ -284,7 +392,9 @@ io.on('connection', (socket) => {
         socket.emit('joined', {
             id: socket.id,
             player: player,
-            mapRadius: GAME_CONFIG.MAP_RADIUS
+            mapRadius: GAME_CONFIG.MAP_RADIUS,
+            tickRate: GAME_CONFIG.TICK_RATE,
+            networkRate: GAME_CONFIG.NETWORK_RATE
         });
 
         console.log(`${player.name} joined the game`);
@@ -299,6 +409,7 @@ io.on('connection', (socket) => {
             if (data.boosting !== undefined) {
                 player.boosting = data.boosting;
             }
+            player.lastUpdate = Date.now();
         }
     });
 
@@ -312,6 +423,7 @@ io.on('connection', (socket) => {
             }
         }
         delete gameState.players[socket.id];
+        delete gameState.lastState[socket.id];
     });
 });
 
