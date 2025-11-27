@@ -21,16 +21,17 @@ app.use(express.static('.'));
 
 const GAME_CONFIG = {
     MAP_RADIUS: 2000,
-    TICK_RATE: 30,
-    NETWORK_RATE: 15,
-    FOOD_COUNT: 200,
+    TICK_RATE: 60,
+    NETWORK_RATE: 30,
+    FOOD_COUNT: 250,
     INITIAL_SNAKE_LENGTH: 10,
-    SNAKE_SPEED: 3,
-    BOOST_SPEED: 6,
-    SEGMENT_DISTANCE: 15,
+    SNAKE_SPEED: 6,
+    BOOST_SPEED: 12,
+    SEGMENT_DISTANCE: 12,
     FOOD_VALUE: 1,
-    VIEW_DISTANCE: 600,
+    VIEW_DISTANCE: 700,
     GRID_SIZE: 200,
+    TURN_SPEED: 0.15,
     SNAKE_COLORS: [
         '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#f39c12',
         '#1abc9c', '#e91e63', '#00bcd4', '#ff5722', '#795548'
@@ -129,7 +130,7 @@ function updatePlayer(player) {
 
     const angleDiff = player.targetAngle - player.angle;
     let normalizedDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
-    player.angle += normalizedDiff * 0.1;
+    player.angle += normalizedDiff * GAME_CONFIG.TURN_SPEED;
 
     const speed = player.boosting ? GAME_CONFIG.BOOST_SPEED : GAME_CONFIG.SNAKE_SPEED;
 
@@ -365,7 +366,9 @@ function gameLoop() {
                     segments: compressSegments(p.segments, maxSegments),
                     score: p.score,
                     alive: p.alive,
-                    angle: p.angle
+                    angle: p.angle,
+                    boosting: p.boosting,
+                    targetAngle: p.targetAngle
                 };
             }
         }
@@ -394,7 +397,14 @@ io.on('connection', (socket) => {
             player: player,
             mapRadius: GAME_CONFIG.MAP_RADIUS,
             tickRate: GAME_CONFIG.TICK_RATE,
-            networkRate: GAME_CONFIG.NETWORK_RATE
+            networkRate: GAME_CONFIG.NETWORK_RATE,
+            config: {
+                SNAKE_SPEED: GAME_CONFIG.SNAKE_SPEED,
+                BOOST_SPEED: GAME_CONFIG.BOOST_SPEED,
+                TURN_SPEED: GAME_CONFIG.TURN_SPEED,
+                SEGMENT_DISTANCE: GAME_CONFIG.SEGMENT_DISTANCE,
+                TICK_RATE: GAME_CONFIG.TICK_RATE
+            }
         });
 
         console.log(`${player.name} joined the game`);

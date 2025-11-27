@@ -57,13 +57,15 @@ This is a multiplayer clone of the popular game Slither.io, built with JavaScrip
 ### Game Configuration
 ```javascript
 MAP_RADIUS: 2000          // Circular map radius
-TICK_RATE: 30             // Server updates per second
-NETWORK_RATE: 15          // Network updates per second
-FOOD_COUNT: 200           // Total food on map (optimized)
+TICK_RATE: 60             // Server updates per second
+NETWORK_RATE: 30          // Network updates per second
+FOOD_COUNT: 250           // Total food on map
 INITIAL_SNAKE_LENGTH: 10  // Starting snake segments
-SNAKE_SPEED: 3            // Normal movement speed
-BOOST_SPEED: 6            // Speed when boosting
-VIEW_DISTANCE: 600        // Visible area radius
+SNAKE_SPEED: 6            // Normal movement speed (2x faster)
+BOOST_SPEED: 12           // Speed when boosting (2x faster)
+TURN_SPEED: 0.15          // Turn responsiveness
+SEGMENT_DISTANCE: 12      // Distance between segments
+VIEW_DISTANCE: 700        // Visible area radius
 ```
 
 ## Performance Optimizations
@@ -72,8 +74,9 @@ VIEW_DISTANCE: 600        // Visible area radius
 - **Spatial Grid Partitioning**: Food stored in grid cells for O(1) lookup
 - **View Distance Culling**: Only send visible entities to each player
 - **Segment Compression**: Large snakes have segments compressed for network
-- **Optimized Tick Rates**: 30 FPS game logic, 15 FPS network updates
+- **Optimized Tick Rates**: 60 FPS game logic, 30 FPS network updates
 - **Distance-squared Collision**: Avoids expensive sqrt calculations
+- **Config Sync**: Server sends game config to client for accurate prediction
 
 ### Client-Side
 - **Color Caching**: Pre-computed color values avoid per-frame conversion
@@ -83,9 +86,12 @@ VIEW_DISTANCE: 600        // Visible area radius
 - **Adaptive Quality Levels**: Auto-detects device and adjusts:
   - High: Full shadows, highlights, 60 FPS
   - Medium: Reduced effects, 60 FPS
-  - Low: Minimal effects, skip segments, 30 FPS
+  - Low: Minimal effects, skip segments, 60 FPS
 - **Screen Culling**: Skip drawing off-screen entities
 - **WebSocket Only**: Forced WebSocket transport for lower latency
+- **Local Prediction**: Client-side prediction for player snake reduces input lag
+- **Segment Interpolation**: Smooth blending between server states
+- **Layered Snake Rendering**: Head renders on top layer so snake can "roll" over itself
 
 ### Mobile Optimizations
 - **Touch Joystick**: Drag anywhere to control direction

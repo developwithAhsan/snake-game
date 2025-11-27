@@ -15,13 +15,25 @@ const MultiplayerGame = (function() {
     let lastServerTime = 0;
     let interpolationFactor = 0;
     let lastNetworkUpdate = 0;
-    let networkInterval = 66;
+    let networkInterval = 33;
     let isMobile = false;
     let qualityLevel = 'high';
     let touchJoystick = { active: false, startX: 0, startY: 0, currentX: 0, currentY: 0 };
 
-    const INPUT_THROTTLE_MS = 50;
-    const CAMERA_LERP = 0.15;
+    let gameConfig = {
+        SNAKE_SPEED: 6,
+        BOOST_SPEED: 12,
+        TURN_SPEED: 0.15,
+        SEGMENT_DISTANCE: 12,
+        TICK_RATE: 60
+    };
+
+    let predictedPlayer = null;
+    let lastPredictionTime = 0;
+
+    const INPUT_THROTTLE_MS = 33;
+    const CAMERA_LERP = 0.12;
+    const PREDICTION_BLEND = 0.2;
 
     const COLORS = {
         background: 0x1a1a2e,
@@ -89,21 +101,99 @@ const MultiplayerGame = (function() {
         return a + (b - a) * t;
     }
 
-    function lerpPoint(p1, p2, t) {
+    function lerpAngle(a, b, t) {
+        let diff = b - a;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        return a + diff * t;
+    }
+
+    function interpolateSegments(prevSegs, currSegs, t) {
+        if (!prevSegs || !currSegs) return currSegs || [];
+        const result = [];
+        const len = Math.min(prevSegs.length, currSegs.length);
+        for (let i = 0; i < len; i++) {
+            result.push({
+                x: lerp(prevSegs[i].x, currSegs[i].x, t),
+                y: lerp(prevSegs[i].y, currSegs[i].y, t)
+            });
+        }
+        for (let i = len; i < currSegs.length; i++) {
+            result.push({ x: currSegs[i].x, y: currSegs[i].y });
+        }
+        return result;
+    }
+
+    function getInterpolatedPlayer(playerId) {
+        const curr = gameState.players[playerId];
+        if (!curr || !curr.segments) return curr;
+        
+        const prev = prevGameState.players && prevGameState.players[playerId];
+        if (!prev || !prev.segments) return curr;
+        
+        const t = Math.min(interpolationFactor, 1);
         return {
-            x: lerp(p1.x, p2.x, t),
-            y: lerp(p1.y, p2.y, t)
+            ...curr,
+            segments: interpolateSegments(prev.segments, curr.segments, t),
+            angle: lerpAngle(prev.angle || 0, curr.angle || 0, t)
         };
+    }
+
+    function updatePredictedPlayer(delta) {
+        if (!myId || !gameState.players[myId]) return;
+        
+        const serverPlayer = gameState.players[myId];
+        if (!serverPlayer.alive || !serverPlayer.segments || serverPlayer.segments.length === 0) {
+            predictedPlayer = null;
+            return;
+        }
+
+        if (!predictedPlayer) {
+            predictedPlayer = {
+                segments: serverPlayer.segments.map(s => ({ x: s.x, y: s.y })),
+                angle: serverPlayer.angle || inputState.angle,
+                score: serverPlayer.score
+            };
+            return;
+        }
+
+        while (predictedPlayer.segments.length < serverPlayer.segments.length) {
+            const last = predictedPlayer.segments[predictedPlayer.segments.length - 1];
+            predictedPlayer.segments.push({ x: last.x, y: last.y });
+        }
+        while (predictedPlayer.segments.length > serverPlayer.segments.length) {
+            predictedPlayer.segments.pop();
+        }
+
+        const angleDiff = inputState.angle - predictedPlayer.angle;
+        let normalizedDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
+        predictedPlayer.angle += normalizedDiff * gameConfig.TURN_SPEED;
+
+        const speed = inputState.boosting ? gameConfig.BOOST_SPEED : gameConfig.SNAKE_SPEED;
+
+        const head = predictedPlayer.segments[0];
+        const newHead = {
+            x: head.x + Math.cos(predictedPlayer.angle) * speed,
+            y: head.y + Math.sin(predictedPlayer.angle) * speed
+        };
+
+        predictedPlayer.segments.unshift(newHead);
+        predictedPlayer.segments.pop();
+
+        const serverHead = serverPlayer.segments[0];
+        const blendFactor = PREDICTION_BLEND;
+        
+        for (let i = 0; i < predictedPlayer.segments.length && i < serverPlayer.segments.length; i++) {
+            const factor = i === 0 ? blendFactor : blendFactor * 0.3;
+            predictedPlayer.segments[i].x = lerp(predictedPlayer.segments[i].x, serverPlayer.segments[i].x, factor);
+            predictedPlayer.segments[i].y = lerp(predictedPlayer.segments[i].y, serverPlayer.segments[i].y, factor);
+        }
     }
 
     function init() {
         detectDevice();
         
-        if (isMobile) {
-            playerName = prompt('Enter your name:', 'Player') || 'Player';
-        } else {
-            playerName = prompt('Enter your name:', 'Player') || 'Player';
-        }
+        playerName = prompt('Enter your name:', 'Player') || 'Player';
 
         socket = io({
             transports: ['websocket'],
@@ -121,6 +211,9 @@ const MultiplayerGame = (function() {
             if (data.networkRate) {
                 networkInterval = 1000 / data.networkRate;
             }
+            if (data.config) {
+                gameConfig = { ...gameConfig, ...data.config };
+            }
             console.log('Joined game as', data.player.name);
             const loadingEl = document.getElementById('loading');
             if (loadingEl) loadingEl.style.display = 'none';
@@ -137,15 +230,17 @@ const MultiplayerGame = (function() {
 
         socket.on('died', (data) => {
             isAlive = false;
+            predictedPlayer = null;
             console.log('You died! Score:', data.score);
         });
 
         socket.on('respawned', (player) => {
             isAlive = true;
+            predictedPlayer = null;
             console.log('Respawned!');
         });
 
-        const gameConfig = {
+        const gameConfigPhaser = {
             type: Phaser.AUTO,
             width: window.innerWidth,
             height: window.innerHeight,
@@ -158,8 +253,8 @@ const MultiplayerGame = (function() {
                 powerPreference: 'high-performance'
             },
             fps: {
-                target: qualityLevel === 'low' ? 30 : 60,
-                forceSetTimeOut: qualityLevel === 'low'
+                target: 60,
+                forceSetTimeOut: false
             },
             scene: {
                 preload: preload,
@@ -168,7 +263,7 @@ const MultiplayerGame = (function() {
             }
         };
 
-        game = new Phaser.Game(gameConfig);
+        game = new Phaser.Game(gameConfigPhaser);
 
         window.addEventListener('resize', () => {
             game.scale.resize(window.innerWidth, window.innerHeight);
@@ -213,10 +308,20 @@ const MultiplayerGame = (function() {
         gridSprite.setOrigin(0, 0);
         gridSprite.setDepth(-10);
 
-        this.snakeGraphics = this.add.graphics();
+        this.snakeBodyGraphics = this.add.graphics();
+        this.snakeBodyGraphics.setDepth(10);
+        
+        this.snakeHeadGraphics = this.add.graphics();
+        this.snakeHeadGraphics.setDepth(20);
+
         this.foodGraphics = this.add.graphics();
+        this.foodGraphics.setDepth(5);
+        
         this.boundaryGraphics = this.add.graphics();
+        this.boundaryGraphics.setDepth(1);
+        
         this.uiGraphics = this.add.graphics();
+        this.uiGraphics.setDepth(100);
 
         uiElements.scoreText = this.add.text(20, 20, 'Score: 0', {
             fontSize: '18px',
@@ -305,6 +410,8 @@ const MultiplayerGame = (function() {
         if (controlsHint && isMobile) {
             controlsHint.innerHTML = 'Drag: Move | Tap Right Side: Boost';
         }
+
+        lastPredictionTime = performance.now();
     }
 
     function sendInput() {
@@ -312,7 +419,7 @@ const MultiplayerGame = (function() {
         const angleDiff = Math.abs(inputState.angle - lastInputState.angle);
         const boostChanged = inputState.boosting !== lastInputState.boosting;
 
-        if (now - lastInputTime > INPUT_THROTTLE_MS || angleDiff > 0.1 || boostChanged) {
+        if (now - lastInputTime > INPUT_THROTTLE_MS || angleDiff > 0.05 || boostChanged) {
             socket.emit('input', inputState);
             lastInputState.angle = inputState.angle;
             lastInputState.boosting = inputState.boosting;
@@ -326,9 +433,11 @@ const MultiplayerGame = (function() {
         sendInput();
 
         const now = performance.now();
-        interpolationFactor = Math.min((now - lastNetworkUpdate) / networkInterval, 1);
+        interpolationFactor = Math.min((now - lastNetworkUpdate) / networkInterval, 1.5);
 
-        const myPlayer = gameState.players[myId];
+        updatePredictedPlayer(delta);
+
+        const myPlayer = predictedPlayer || gameState.players[myId];
         if (myPlayer && myPlayer.segments && myPlayer.segments.length > 0) {
             const head = myPlayer.segments[0];
             targetCamera.x = head.x;
@@ -343,7 +452,8 @@ const MultiplayerGame = (function() {
             gridSprite.tilePositionY = camera.y;
         }
 
-        this.snakeGraphics.clear();
+        this.snakeBodyGraphics.clear();
+        this.snakeHeadGraphics.clear();
         this.foodGraphics.clear();
         this.boundaryGraphics.clear();
         this.uiGraphics.clear();
@@ -393,7 +503,7 @@ const MultiplayerGame = (function() {
             graphics.strokeCircle(boundaryScreenX, boundaryScreenY, mapRadius);
         }
 
-        const myPlayer = gameState.players[myId];
+        const myPlayer = predictedPlayer || gameState.players[myId];
         if (myPlayer && myPlayer.segments && myPlayer.segments.length > 0) {
             const head = myPlayer.segments[0];
             const distFromCenter = Math.sqrt(head.x * head.x + head.y * head.y);
@@ -415,7 +525,6 @@ const MultiplayerGame = (function() {
         const height = this.cameras.main.height;
 
         const foodSize = qualityLevel === 'low' ? 6 : 8;
-        const highlightSize = qualityLevel === 'low' ? 2 : 3;
 
         const foodByColor = new Map();
         
@@ -432,7 +541,7 @@ const MultiplayerGame = (function() {
             if (!foodByColor.has(color)) {
                 foodByColor.set(color, []);
             }
-            foodByColor.set(color, [...foodByColor.get(color), { screenX, screenY }]);
+            foodByColor.get(color).push({ screenX, screenY });
         }
 
         for (const [color, positions] of foodByColor) {
@@ -446,14 +555,15 @@ const MultiplayerGame = (function() {
             graphics.fillStyle(0xffffff, 0.3);
             for (const [color, positions] of foodByColor) {
                 for (const pos of positions) {
-                    graphics.fillCircle(pos.screenX - 2, pos.screenY - 2, highlightSize);
+                    graphics.fillCircle(pos.screenX - 2, pos.screenY - 2, 3);
                 }
             }
         }
     }
 
     function drawSnakes() {
-        const graphics = this.snakeGraphics;
+        const bodyGraphics = this.snakeBodyGraphics;
+        const headGraphics = this.snakeHeadGraphics;
         const centerX = this.cameras.main.width / 2;
         const centerY = this.cameras.main.height / 2;
         const width = this.cameras.main.width;
@@ -473,16 +583,24 @@ const MultiplayerGame = (function() {
 
             activePlayerIds.add(player.id);
 
-            const color = getColor(player.color);
             const isMe = player.id === myId;
-            const segmentCount = player.segments.length;
+            let renderPlayer = player;
+            
+            if (isMe && predictedPlayer) {
+                renderPlayer = { ...player, segments: predictedPlayer.segments, angle: predictedPlayer.angle };
+            } else if (!isMe) {
+                renderPlayer = getInterpolatedPlayer(player.id) || player;
+            }
+
+            const color = getColor(renderPlayer.color);
+            const segmentCount = renderPlayer.segments.length;
 
             if (qualityLevel !== 'low') {
-                graphics.fillStyle(0x000000, 0.3);
-                for (let i = segmentCount - 1; i >= 0; i -= segmentSkip) {
-                    const seg = player.segments[i];
-                    const screenX = centerX + (seg.x - camera.x) + 5;
-                    const screenY = centerY + (seg.y - camera.y) + 5;
+                bodyGraphics.fillStyle(0x000000, 0.3);
+                for (let i = segmentCount - 1; i >= 1; i -= segmentSkip) {
+                    const seg = renderPlayer.segments[i];
+                    const screenX = centerX + (seg.x - camera.x) + 4;
+                    const screenY = centerY + (seg.y - camera.y) + 4;
 
                     if (screenX < -30 || screenX > width + 30 ||
                         screenY < -30 || screenY > height + 30) {
@@ -490,13 +608,13 @@ const MultiplayerGame = (function() {
                     }
 
                     const size = 12 - (i / segmentCount) * 4;
-                    graphics.fillCircle(screenX, screenY, size);
+                    bodyGraphics.fillCircle(screenX, screenY, size);
                 }
             }
 
-            graphics.fillStyle(color, 1);
-            for (let i = segmentCount - 1; i >= 0; i -= segmentSkip) {
-                const seg = player.segments[i];
+            bodyGraphics.fillStyle(color, 1);
+            for (let i = segmentCount - 1; i >= 1; i -= segmentSkip) {
+                const seg = renderPlayer.segments[i];
                 const screenX = centerX + (seg.x - camera.x);
                 const screenY = centerY + (seg.y - camera.y);
 
@@ -506,13 +624,13 @@ const MultiplayerGame = (function() {
                 }
 
                 const size = 12 - (i / segmentCount) * 4;
-                graphics.fillCircle(screenX, screenY, size);
+                bodyGraphics.fillCircle(screenX, screenY, size);
             }
 
             if (isMe && qualityLevel !== 'low') {
-                graphics.lineStyle(2, 0xffffff, 0.3);
-                for (let i = segmentCount - 1; i >= 0; i -= segmentSkip * 2) {
-                    const seg = player.segments[i];
+                bodyGraphics.lineStyle(2, 0xffffff, 0.2);
+                for (let i = segmentCount - 1; i >= 1; i -= segmentSkip * 2) {
+                    const seg = renderPlayer.segments[i];
                     const screenX = centerX + (seg.x - camera.x);
                     const screenY = centerY + (seg.y - camera.y);
 
@@ -522,20 +640,33 @@ const MultiplayerGame = (function() {
                     }
 
                     const size = 12 - (i / segmentCount) * 4;
-                    graphics.strokeCircle(screenX, screenY, size);
+                    bodyGraphics.strokeCircle(screenX, screenY, size);
                 }
             }
 
-            const head = player.segments[0];
+            const head = renderPlayer.segments[0];
             const headX = centerX + (head.x - camera.x);
             const headY = centerY + (head.y - camera.y);
 
             if (headX >= -30 && headX <= width + 30 &&
                 headY >= -30 && headY <= height + 30) {
 
-                let angle = player.angle || 0;
-                if (player.segments.length > 1) {
-                    const next = player.segments[1];
+                if (qualityLevel !== 'low') {
+                    headGraphics.fillStyle(0x000000, 0.3);
+                    headGraphics.fillCircle(headX + 4, headY + 4, 12);
+                }
+
+                headGraphics.fillStyle(color, 1);
+                headGraphics.fillCircle(headX, headY, 12);
+
+                if (isMe) {
+                    headGraphics.lineStyle(2, 0xffffff, 0.3);
+                    headGraphics.strokeCircle(headX, headY, 12);
+                }
+
+                let angle = renderPlayer.angle || 0;
+                if (renderPlayer.segments.length > 1) {
+                    const next = renderPlayer.segments[1];
                     angle = Math.atan2(head.y - next.y, head.x - next.x);
                 }
 
@@ -548,14 +679,14 @@ const MultiplayerGame = (function() {
                 const eye2X = headX + Math.cos(eyeAngle2) * eyeOffset;
                 const eye2Y = headY + Math.sin(eyeAngle2) * eyeOffset;
 
-                graphics.fillStyle(0xffffff, 1);
-                graphics.fillCircle(eye1X, eye1Y, 5);
-                graphics.fillCircle(eye2X, eye2Y, 5);
+                headGraphics.fillStyle(0xffffff, 1);
+                headGraphics.fillCircle(eye1X, eye1Y, 5);
+                headGraphics.fillCircle(eye2X, eye2Y, 5);
 
                 const pupilOffset = 2;
-                graphics.fillStyle(0x000000, 1);
-                graphics.fillCircle(eye1X + Math.cos(angle) * pupilOffset, eye1Y + Math.sin(angle) * pupilOffset, 2.5);
-                graphics.fillCircle(eye2X + Math.cos(angle) * pupilOffset, eye2Y + Math.sin(angle) * pupilOffset, 2.5);
+                headGraphics.fillStyle(0x000000, 1);
+                headGraphics.fillCircle(eye1X + Math.cos(angle) * pupilOffset, eye1Y + Math.sin(angle) * pupilOffset, 2.5);
+                headGraphics.fillCircle(eye2X + Math.cos(angle) * pupilOffset, eye2Y + Math.sin(angle) * pupilOffset, 2.5);
 
                 if (!isMe) {
                     if (!uiElements.nameTexts[player.id]) {
@@ -607,35 +738,33 @@ const MultiplayerGame = (function() {
             uiElements.lengthText.setText(`Length: ${myPlayer.segments ? myPlayer.segments.length : 0}`);
         }
 
-        if (qualityLevel !== 'low') {
-            const minimapSize = isMobile ? 100 : 150;
-            const minimapX = 10;
-            const minimapY = height - minimapSize - 10;
+        const minimapSize = isMobile ? 100 : 150;
+        const minimapX = 10;
+        const minimapY = height - minimapSize - 10;
 
-            graphics.fillStyle(0x000000, 0.5);
-            graphics.fillCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
+        graphics.fillStyle(0x000000, 0.5);
+        graphics.fillCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
 
-            graphics.lineStyle(2, 0xff4444, 0.8);
-            graphics.strokeCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
+        graphics.lineStyle(2, 0xff4444, 0.8);
+        graphics.strokeCircle(minimapX + minimapSize / 2, minimapY + minimapSize / 2, minimapSize / 2);
 
-            const scale = minimapSize / (mapRadius * 2);
+        const scale = minimapSize / (mapRadius * 2);
 
-            for (const id in gameState.players) {
-                const player = gameState.players[id];
-                if (!player.alive || !player.segments || player.segments.length === 0) continue;
+        for (const id in gameState.players) {
+            const player = gameState.players[id];
+            if (!player.alive || !player.segments || player.segments.length === 0) continue;
 
-                const head = player.segments[0];
-                const dotX = minimapX + minimapSize / 2 + head.x * scale;
-                const dotY = minimapY + minimapSize / 2 + head.y * scale;
+            const head = player.segments[0];
+            const dotX = minimapX + minimapSize / 2 + head.x * scale;
+            const dotY = minimapY + minimapSize / 2 + head.y * scale;
 
-                if (player.id === myId) {
-                    graphics.fillStyle(0x00ff00, 1);
-                    graphics.fillCircle(dotX, dotY, 4);
-                } else {
-                    const color = getColor(player.color);
-                    graphics.fillStyle(color, 1);
-                    graphics.fillCircle(dotX, dotY, 3);
-                }
+            if (player.id === myId) {
+                graphics.fillStyle(0x00ff00, 1);
+                graphics.fillCircle(dotX, dotY, 4);
+            } else {
+                const color = getColor(player.color);
+                graphics.fillStyle(color, 1);
+                graphics.fillCircle(dotX, dotY, 3);
             }
         }
 
@@ -650,9 +779,6 @@ const MultiplayerGame = (function() {
         if (isMobile) {
             graphics.fillStyle(0xffffff, 0.15);
             graphics.fillCircle(width - 80, height - 100, 50);
-            
-            graphics.fillStyle(0xffffff, 0.3);
-            const boostText = this.add.text ? null : 'BOOST';
         }
     }
 
